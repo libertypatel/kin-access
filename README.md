@@ -96,6 +96,7 @@ prefetch cache                    safe fallback
 - Risky actions always need a confirmation step, and the safe choice is highlighted first.
 - Timeouts and fallbacks mean the user always has choices.
 - **KIN Access is an accessibility tool for computer control. It gives no medical advice and makes no health decisions.**
+- Meets WCAG AA color contrast, offers a Large text mode, and respects the system “Reduce motion” setting.
 
 ## Running it locally
 
