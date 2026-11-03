@@ -13,7 +13,10 @@ load_dotenv()
 client = OpenAI(
     base_url="https://api.meta.ai/v1",
     api_key=os.environ["MODEL_API_KEY"],
+    timeout=20,
+    max_retries=1,
 )
+
 MODEL = "muse-spark-1.1"
 
 app = FastAPI(title="KIN Access")
@@ -75,8 +78,10 @@ RESPONSE_SCHEMA = {
 SYSTEM_PROMPT = """You help a person with a severe motor disability use a computer
 with a single switch. Each press costs them real effort, so your job is to predict
 the 4 actions they most likely want next, most likely first.
+When there are several possible replies or messages, include each of them so the
+user can choose. Favor actions that move the current task forward over general
+navigation or settings.
 Only choose element_id values from the provided list. Never invent new ones."""
-
 
 # ---------- Safety: validate the AI's choices ----------
 

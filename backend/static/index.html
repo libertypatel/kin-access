@@ -85,12 +85,30 @@
 
   <section class="full">
     <h2>Results</h2>
+    <div id="summary" style="font-size:18px;font-weight:600;margin:6px 0 8px"></div>
     <div class="muted" id="aiStats"></div>
     <table>
-      <thead><tr><th>Task</th><th>Mode</th><th>Presses</th><th>Seconds</th><th>Completed</th></tr></thead>
+      <thead><tr><th>Task</th><th>Mode</th><th>Presses</th><th>Traditional minimum</th><th>Presses saved</th><th>Seconds</th></tr></thead>
       <tbody id="results"></tbody>
     </table>
     <button class="btn" id="copyResults" style="margin-top:10px">Copy results as Markdown</button>
+  </section>
+
+  <section class="full">
+    <h2>Automatic evaluation</h2>
+    <div class="muted">Plays a perfect switch user with the real Muse Spark model: at each step it picks the
+      first AI suggestion that moves the task forward, or uses "Something else" if none does.
+      Presses are counted exactly as in the live interface. No caching, so each run is a fresh AI call.</div>
+    <div style="margin:10px 0">
+      <button class="btn" id="runEval">Run automatic evaluation (8 tasks x 3 runs)</button>
+      <button class="btn" id="copyEval">Copy evaluation as Markdown</button>
+    </div>
+    <div id="evalStatus" class="muted"></div>
+    <div id="evalSummary" style="font-size:18px;font-weight:600;margin:6px 0 8px"></div>
+    <table>
+      <thead><tr><th>Task</th><th>Traditional minimum</th><th>KIN runs (presses)</th><th>KIN average</th><th>Presses saved</th><th>Top pick right</th></tr></thead>
+      <tbody id="evalRows"></tbody>
+    </table>
   </section>
 </main>
 
@@ -276,16 +294,21 @@ function fetchSuggestions(payload) {
   const key = JSON.stringify(payload);
   if (!cache.has(key)) {
     const t0 = performance.now();
+    // Never let a slow or stuck AI call freeze the user: give up after 15 seconds.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 15000);
     const p = fetch("/suggest", {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
-    }).then(r => r.json()).then(data => {
+      signal: controller.signal,
+    }).then(r => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); }).then(data => {
+      clearTimeout(timer);
       aiStats.calls++;
       aiStats.modelMs += performance.now() - t0;
       aiStats.rejected += data.rejected_count || 0;
       if (data.used_fallback) aiStats.fallbacks++;
       return data;
     });
-    p.catch(() => cache.delete(key));   // let a failed call be retried later
+    p.catch(() => { clearTimeout(timer); cache.delete(key); });   // let a failed call be retried later
     cache.set(key, p);
   }
   return cache.get(key);
@@ -335,7 +358,7 @@ async function refreshOptions() {
 }
 
 function press(kind) {
-  if (busy) return;
+  if (busy || evalRunning) return;
   if (currentTask && !currentTask.finished && startTime === null) startTime = performance.now();
   presses++;
   if (kind === "next") { idx = (idx + 1) % options.length; render(); return; }
@@ -366,6 +389,42 @@ function afterAction(id) {
   refreshOptions();
 }
 
+// ---------------- Traditional scanning baseline ----------------
+// Finds the fewest presses traditional scanning needs for a task with zero mistakes.
+// Selecting item i costs i Space presses + 1 Enter. Risky items add 2 (move past
+// Cancel, then confirm). Uses Dijkstra's shortest-path search over app states.
+
+function stateKey(st) { const { recent, ...rest } = st; return JSON.stringify(rest); }
+
+function minTraditionalPresses(task) {
+  const saved = app;
+  silent = true;
+  try {
+    const start = freshAppState();
+    const best = new Map([[stateKey(start), 0]]);
+    const queue = [{ st: start, cost: 0 }];
+    while (queue.length) {
+      queue.sort((a, b) => a.cost - b.cost);
+      const { st, cost } = queue.shift();
+      if (cost > (best.get(stateKey(st)) ?? Infinity)) continue;
+      app = st;
+      if (task.done()) return cost;
+      if (cost > 200) break;
+      getScreen().elements.forEach((el, i) => {
+        app = structuredClone(st);
+        perform(el.id);
+        const next = app;
+        const nextCost = cost + i + 1 + (el.risky ? 2 : 0);
+        const k = stateKey(next);
+        if (nextCost < (best.get(k) ?? Infinity)) { best.set(k, nextCost); queue.push({ st: next, cost: nextCost }); }
+      });
+    }
+    return null;
+  } finally { app = saved; silent = false; }
+}
+
+const BASELINE = TASKS.map(t => minTraditionalPresses(t));
+
 // ---------------- Tasks and results ----------------
 
 function startTask() {
@@ -380,15 +439,22 @@ function checkTask() {
   if (!currentTask || currentTask.finished || !currentTask.done()) return;
   currentTask.finished = true;
   const secs = startTime ? (performance.now() - startTime) / 1000 : 0;
-  results.push({ task: currentTask.name, mode: mode === "kin" ? "KIN Access" : "Traditional", presses, secs, ok: true });
+  results.push({ task: currentTask.name, mode: mode === "kin" ? "KIN Access" : "Traditional (manual)",
+                 presses, secs, ok: true, baseline: BASELINE[currentTask.index] });
   toast("Task complete: " + presses + " presses");
   renderResults();
 }
 
 function renderResults() {
+  const saved = r => r.baseline ? Math.round((1 - r.presses / r.baseline) * 100) + "%" : "-";
   document.getElementById("results").innerHTML = results.map(r =>
-    `<tr><td>${r.task}</td><td>${r.mode}</td><td>${r.presses}</td><td>${r.secs.toFixed(1)}</td><td>${r.ok ? "Yes" : "No"}</td></tr>`
+    `<tr><td>${r.task}</td><td>${r.mode}</td><td>${r.presses}</td><td>${r.baseline ?? "-"}</td><td>${saved(r)}</td><td>${r.secs.toFixed(1)}</td></tr>`
   ).join("");
+  const kin = results.filter(r => r.mode === "KIN Access" && r.baseline);
+  const sumK = kin.reduce((a, r) => a + r.presses, 0), sumB = kin.reduce((a, r) => a + r.baseline, 0);
+  document.getElementById("summary").textContent = kin.length
+    ? `${kin.length} task(s) with KIN Access: ${sumK} presses total vs ${sumB} with traditional scanning (minimum, no mistakes). ${Math.round((1 - sumK / sumB) * 100)}% fewer presses.`
+    : "Run tasks in KIN Access mode to compare against the traditional scanning minimum.";
   const model = aiStats.calls ? (aiStats.modelMs / aiStats.calls / 1000).toFixed(2) : "0";
   const wait = aiStats.waits ? (aiStats.waitMs / aiStats.waits / 1000).toFixed(2) : "0";
   document.getElementById("aiStats").textContent =
@@ -396,8 +462,162 @@ function renderResults() {
 }
 
 function resultsMarkdown() {
-  const rows = results.map(r => `| ${r.task} | ${r.mode} | ${r.presses} | ${r.secs.toFixed(1)} |`);
-  return ["| Task | Mode | Presses | Seconds |", "|---|---|---|---|", ...rows].join("\n");
+  const rows = results.map(r => {
+    const pct = r.baseline ? Math.round((1 - r.presses / r.baseline) * 100) + "%" : "-";
+    return `| ${r.task} | ${r.mode} | ${r.presses} | ${r.baseline ?? "-"} | ${pct} |`;
+  });
+  return ["| Task | Mode | Presses | Traditional minimum | Presses saved |", "|---|---|---|---|---|", ...rows,
+          "", document.getElementById("summary").textContent].join("\n");
+}
+
+// ---------------- Automatic evaluation ----------------
+// A simulated "perfect user" that never makes a mistake. It only accepts an action
+// that gets strictly closer to finishing the task, so the press count measures the AI alone.
+
+const distCache = new Map();
+
+// Fewest actions (not presses) from the current app state to finishing the task.
+function stepsToGoal(task, taskIndex) {
+  const key = taskIndex + "|" + stateKey(app);
+  if (distCache.has(key)) return distCache.get(key);
+  const saved = app;
+  let frontier = [structuredClone(app)], seen = new Set([stateKey(app)]), depth = 0, answer = Infinity;
+  try {
+    while (frontier.length && depth <= 10) {
+      const next = [];
+      for (const st of frontier) {
+        app = st;
+        if (task.done()) { answer = depth; frontier = []; break; }
+        for (const el of getScreen().elements) {
+          app = structuredClone(st); perform(el.id);
+          const k = stateKey(app);
+          if (!seen.has(k)) { seen.add(k); next.push(app); }
+        }
+      }
+      if (answer !== Infinity) break;
+      frontier = next; depth++;
+    }
+  } finally { app = saved; }
+  distCache.set(key, answer);
+  return answer;
+}
+
+function makesProgress(id, task, taskIndex) {
+  const before = stepsToGoal(task, taskIndex);
+  const saved = app;
+  app = structuredClone(saved);
+  try { perform(id); return stepsToGoal(task, taskIndex) < before; }
+  finally { app = saved; }
+}
+
+async function askModel(payload) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 20000);
+  try {
+    const r = await fetch("/suggest", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload), signal: controller.signal });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    return await r.json();
+  } finally { clearTimeout(timer); }
+}
+
+async function evalOneRun(task, taskIndex) {
+  app = freshAppState();
+  let count = 0, steps = 0, topRight = 0, decisions = 0;
+  while (!task.done() && steps < 15) {
+    steps++;
+    const screen = getScreen();
+    let ids = [];
+    try { ids = ((await askModel(buildPayload())).suggestions || []).map(x => x.element_id); }
+    catch (e) { ids = []; }
+    ids = ids.filter(id => screen.elements.some(el => el.id === id));
+    const risky = id => screen.elements.find(el => el.id === id).risky ? 2 : 0;
+
+    decisions++;
+    const k = ids.findIndex(id => makesProgress(id, task, taskIndex));
+    let chosen;
+    if (k >= 0) {
+      if (k === 0) topRight++;
+      chosen = ids[k];
+      count += k + 1 + risky(chosen);
+    } else {
+      // "Something else" sits after the suggestions, then scan the whole screen.
+      count += ids.length + 1;
+      const i = screen.elements.findIndex(el => makesProgress(el.id, task, taskIndex));
+      if (i < 0) return null;
+      chosen = screen.elements[i].id;
+      count += i + 1 + risky(chosen);
+    }
+    perform(chosen);
+  }
+  return task.done() ? { presses: count, topRight, decisions } : null;
+}
+
+const evalResults = [];   // { task, baseline, runs: [presses], topRight, decisions }
+let evalRunning = false;
+
+async function runEvaluation(runsPerTask = 3) {
+  if (evalRunning) return;
+  evalRunning = true;
+  const savedApp = app;
+  silent = true;
+  evalResults.length = 0;
+  const status = document.getElementById("evalStatus");
+  try {
+    for (let t = 0; t < TASKS.length; t++) {
+      const row = { task: TASKS[t].name, baseline: BASELINE[t], runs: [], topRight: 0, decisions: 0 };
+      evalResults.push(row);
+      for (let r = 0; r < runsPerTask; r++) {
+        status.textContent = `Running task ${t + 1} of ${TASKS.length}, run ${r + 1} of ${runsPerTask}...`;
+        const res = await evalOneRun(TASKS[t], t);
+        row.runs.push(res ? res.presses : null);
+        if (res) { row.topRight += res.topRight; row.decisions += res.decisions; }
+        renderEval();
+      }
+    }
+    status.textContent = "Done. Every run used a fresh call to Muse Spark.";
+  } finally {
+    app = savedApp; silent = false; evalRunning = false;
+    render();
+  }
+}
+
+function evalTotals() {
+  let kin = 0, base = 0, wins = 0, n = 0, top = 0, dec = 0;
+  for (const row of evalResults) {
+    for (const p of row.runs) { if (p == null) continue; kin += p; base += row.baseline; n++; if (p < row.baseline) wins++; }
+    top += row.topRight; dec += row.decisions;
+  }
+  return { kin, base, wins, n, top, dec };
+}
+
+function renderEval() {
+  document.getElementById("evalRows").innerHTML = evalResults.map(row => {
+    const ok = row.runs.filter(p => p != null);
+    const avg = ok.length ? ok.reduce((a, b) => a + b, 0) / ok.length : null;
+    const saved = avg != null ? Math.round((1 - avg / row.baseline) * 100) + "%" : "-";
+    const top = row.decisions ? Math.round(row.topRight / row.decisions * 100) + "%" : "-";
+    return `<tr><td>${row.task}</td><td>${row.baseline}</td><td>${row.runs.map(p => p ?? "failed").join(", ")}</td>` +
+           `<td>${avg != null ? avg.toFixed(1) : "-"}</td><td>${saved}</td><td>${top}</td></tr>`;
+  }).join("");
+  const t = evalTotals();
+  document.getElementById("evalSummary").textContent = t.n
+    ? `${t.n} runs: ${t.kin} presses with KIN Access vs ${t.base} with traditional scanning (minimum). ` +
+      `${Math.round((1 - t.kin / t.base) * 100)}% fewer presses. Beat traditional in ${t.wins} of ${t.n} runs. ` +
+      `Muse Spark's first suggestion was right ${Math.round(t.top / t.dec * 100)}% of the time.`
+    : "";
+}
+
+function evalMarkdown() {
+  const rows = evalResults.map(row => {
+    const ok = row.runs.filter(p => p != null);
+    const avg = ok.length ? ok.reduce((a, b) => a + b, 0) / ok.length : null;
+    const saved = avg != null ? Math.round((1 - avg / row.baseline) * 100) + "%" : "-";
+    const top = row.decisions ? Math.round(row.topRight / row.decisions * 100) + "%" : "-";
+    return `| ${row.task} | ${row.baseline} | ${row.runs.map(p => p ?? "failed").join(", ")} | ${avg != null ? avg.toFixed(1) : "-"} | ${saved} | ${top} |`;
+  });
+  return ["| Task | Traditional minimum | KIN runs (presses) | KIN average | Presses saved | Top pick right |",
+          "|---|---|---|---|---|---|", ...rows, "", document.getElementById("evalSummary").textContent].join("\n");
 }
 
 // ---------------- Rendering ----------------
@@ -503,6 +723,8 @@ onClick("reset", () => { app = freshAppState(); presses = 0; startTime = null; c
   document.getElementById("taskBox").className = "task";
   document.getElementById("taskBox").textContent = "No task running. Pick one above and press \"Start task\".";
   refreshOptions(); });
+onClick("runEval", () => runEvaluation(3));
+onClick("copyEval", () => { navigator.clipboard.writeText(evalMarkdown()); toast("Evaluation copied"); });
 onClick("copyResults", () => { navigator.clipboard.writeText(resultsMarkdown()); toast("Results copied"); });
 
 refreshOptions();
