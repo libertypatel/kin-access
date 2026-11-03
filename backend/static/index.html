@@ -1,0 +1,511 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KIN Access</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #181b22; --card: #22262f; --line: #2c313c;
+    --text: #e8eaf0; --muted: #9aa3b2; --accent: #4f8cff;
+    --focus: #ffd34d; --risky: #ff7b7b; --ok: #3ecf8e;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+         background: var(--bg); color: var(--text); }
+  header { display: flex; align-items: center; gap: 12px; padding: 12px 20px; flex-wrap: wrap;
+           background: var(--panel); border-bottom: 1px solid var(--line); }
+  header h1 { font-size: 20px; margin: 0 8px 0 0; }
+  .stat { background: var(--card); padding: 6px 12px; border-radius: 8px; font-size: 13px; color: var(--muted); }
+  .stat b { color: var(--text); font-size: 18px; font-variant-numeric: tabular-nums; margin-left: 4px; }
+  .btn { background: var(--card); color: var(--text); border: 1px solid var(--line);
+         padding: 7px 12px; border-radius: 8px; cursor: pointer; font-size: 14px; }
+  .btn.active { background: var(--accent); border-color: var(--accent); }
+  select.btn { cursor: pointer; }
+  main { display: grid; grid-template-columns: 1.3fr 1fr; gap: 20px; padding: 20px; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+  section { background: var(--panel); border-radius: 12px; padding: 16px; }
+  h2 { margin: 0 0 6px; font-size: 17px; }
+  .muted { color: var(--muted); font-size: 13px; }
+  .toolbar { display: flex; gap: 8px; flex-wrap: wrap; margin: 12px 0; }
+  .content { display: flex; flex-direction: column; gap: 8px; }
+  .el { background: var(--card); color: var(--text); border: 3px solid transparent;
+        border-radius: 8px; padding: 10px 12px; font-size: 15px; text-align: left; }
+  .el.risky { color: #ffc2c2; }
+  .body { background: var(--card); padding: 14px; border-radius: 8px; line-height: 1.5;
+          white-space: pre-wrap; margin-bottom: 4px; }
+  .highlight { border-color: var(--focus) !important; box-shadow: 0 0 0 4px rgba(255, 211, 77, .3); }
+  .choice { display: block; width: 100%; margin: 10px 0; padding: 16px; font-size: 18px;
+            border-radius: 10px; background: var(--card); color: var(--text);
+            border: 3px solid transparent; text-align: left; }
+  .choice .n { color: var(--muted); margin-right: 8px; }
+  .choice .tag { color: var(--risky); font-size: 13px; margin-left: 8px; }
+  .confirm-title { color: var(--risky); font-weight: 600; margin: 8px 0; }
+  kbd { background: #2c313c; border-radius: 4px; padding: 1px 6px; font-size: 13px; }
+  .thinking { color: var(--muted); padding: 24px 0; font-size: 16px; }
+  .task { background: var(--card); border-radius: 8px; padding: 10px 12px; margin-top: 12px; }
+  .task.done { outline: 2px solid var(--ok); }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 8px; }
+  th, td { text-align: left; padding: 6px; border-bottom: 1px solid var(--line); }
+  .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+           background: var(--ok); color: #05210f; padding: 10px 18px; border-radius: 8px;
+           font-weight: 600; opacity: 0; transition: opacity .3s; pointer-events: none; }
+  .toast.show { opacity: 1; }
+  .full { grid-column: 1 / -1; }
+</style>
+</head>
+<body>
+<header>
+  <h1>KIN Access</h1>
+  <button class="btn" id="modeKin">KIN Access</button>
+  <button class="btn" id="modeTrad">Traditional scanning</button>
+  <span class="stat">Presses<b id="presses">0</b></span>
+  <span class="stat">Time<b id="timer">0.0s</b></span>
+  <select class="btn" id="taskSelect"></select>
+  <button class="btn" id="startTask">Start task</button>
+  <button class="btn" id="reset">Reset</button>
+</header>
+
+<main>
+  <section>
+    <h2>Mail</h2>
+    <div class="muted" id="screenName"></div>
+    <div class="toolbar" id="toolbar"></div>
+    <div class="content" id="content"></div>
+  </section>
+
+  <section>
+    <div id="panel"></div>
+    <p class="muted" style="margin-top:16px">
+      Switch controls: <kbd>Space</kbd> moves to the next option, <kbd>Enter</kbd> selects it.
+      Most accessibility switches connect as keyboard keys, so these stand in for real switches.
+    </p>
+    <div class="task" id="taskBox">No task running. Pick one above and press "Start task".</div>
+  </section>
+
+  <section class="full">
+    <h2>Results</h2>
+    <div class="muted" id="aiStats"></div>
+    <table>
+      <thead><tr><th>Task</th><th>Mode</th><th>Presses</th><th>Seconds</th><th>Completed</th></tr></thead>
+      <tbody id="results"></tbody>
+    </table>
+    <button class="btn" id="copyResults" style="margin-top:10px">Copy results as Markdown</button>
+  </section>
+</main>
+
+<div class="toast" id="toast"></div>
+
+<script>
+// ---------------- Mock email app ----------------
+
+const TOOLBAR = [
+  { id: "tb_refresh", label: "Refresh" },
+  { id: "tb_search", label: "Search" },
+  { id: "tb_labels", label: "Labels" },
+  { id: "tb_settings", label: "Settings" },
+  { id: "tb_sent", label: "Sent folder" },
+  { id: "tb_help", label: "Help" },
+];
+
+function freshAppState() {
+  return { screen: "inbox", spamDeleted: false, workArchived: false,
+           draft: null, sent: [], recent: [] };
+}
+let app = freshAppState();
+
+const EMAILS = {
+  mom: "From: Mom\nHi sweetie, are you coming to dinner Sunday? Let me know!\nLove, Mom",
+  work: "From: Dana (Work)\nHi, can you send the quarterly report by Friday?\nThanks, Dana",
+  spam: "From: Prize Center\nCONGRATULATIONS! You won a $1,000 gift card. Click here to claim!",
+};
+
+function wasSentTo(to) { return app.sent.some(m => m.to === to); }
+
+// Returns what is on screen: a description for the AI and the clickable elements.
+function getScreen() {
+  const s = app;
+  let content = [], body = null, description = "", name = "";
+
+  if (s.screen === "inbox") {
+    name = "Inbox";
+    content.push({ id: "open_email_mom", label: "Open email from Mom" + (wasSentTo("Mom") ? " (replied)" : "") });
+    if (!s.workArchived) content.push({ id: "open_email_work", label: "Open email from Work" });
+    if (!s.spamDeleted) content.push({ id: "open_email_spam", label: "Open 'You won a prize!' email" });
+    content.push({ id: "compose", label: "Write a new email" });
+    if (!s.spamDeleted) content.push({ id: "delete_spam", label: "Delete spam email", risky: true });
+    content.push({ id: "scroll_down", label: "Scroll down" });
+    const list = ["Mom: 'Are you coming to dinner Sunday?'" + (wasSentTo("Mom") ? " (already replied)" : " (unread)")];
+    if (!s.workArchived) list.push("Work: 'Can you send the report by Friday?'" + (wasSentTo("Work") ? " (already replied)" : " (unread)"));
+    if (!s.spamDeleted) list.push("Spam: 'You won a prize!'");
+    description = "Email inbox. Emails: " + list.join("; ") + ".";
+  } else if (s.screen === "email_mom") {
+    name = "Reading: email from Mom";
+    body = EMAILS.mom;
+    content = [
+      { id: "reply_mom_yes", label: "Reply: \"Yes, I'll be there!\"" },
+      { id: "reply_mom_no", label: "Reply: \"Sorry, I can't make it.\"" },
+      { id: "back_inbox", label: "Back to inbox" },
+      { id: "delete_email_mom", label: "Delete this email", risky: true },
+    ];
+    description = "Reading an email from Mom: 'Are you coming to dinner Sunday? Let me know!'";
+  } else if (s.screen === "email_work") {
+    name = "Reading: email from Work";
+    body = EMAILS.work;
+    content = [
+      { id: "reply_work_yes", label: "Reply: \"Yes, I'll send it by Friday.\"" },
+      { id: "reply_work_later", label: "Reply: \"Can we talk tomorrow?\"" },
+      { id: "archive_work", label: "Archive this email" },
+      { id: "back_inbox", label: "Back to inbox" },
+    ];
+    description = "Reading a work email from Dana: 'Can you send the quarterly report by Friday?'";
+  } else if (s.screen === "email_spam") {
+    name = "Reading: spam email";
+    body = EMAILS.spam;
+    content = [
+      { id: "delete_spam", label: "Delete spam email", risky: true },
+      { id: "back_inbox", label: "Back to inbox" },
+    ];
+    description = "Reading an obvious spam email claiming the user won a gift card.";
+  } else if (s.screen === "compose") {
+    name = "New email";
+    body = "Choose who to write to.";
+    content = [
+      { id: "compose_mom", label: "Write to Mom: \"Thinking of you!\"" },
+      { id: "compose_work", label: "Write to Work: \"Running late today.\"" },
+      { id: "back_inbox", label: "Back to inbox" },
+    ];
+    description = "Composing a new email. The user can pick a recipient and a short message.";
+  } else if (s.screen === "draft") {
+    name = "Draft ready to send";
+    body = "To: " + s.draft.to + "\n\n" + s.draft.text;
+    content = [
+      { id: "send_draft", label: "Send", risky: true },
+      { id: "discard_draft", label: "Discard draft" },
+    ];
+    description = "A draft email to " + s.draft.to + " is ready: '" + s.draft.text + "'.";
+  }
+
+  return { name, body, description, toolbar: TOOLBAR, content, elements: [...TOOLBAR, ...content] };
+}
+
+function labelOf(id) {
+  const el = getScreen().elements.find(e => e.id === id);
+  return el ? el.label : id;
+}
+
+function makeDraft(to, text) { app.draft = { to, text }; app.screen = "draft"; }
+
+// Carries out an action in the mock email app.
+function perform(id) {
+  app.recent.push(labelOf(id));
+  app.recent = app.recent.slice(-5);
+  switch (id) {
+    case "open_email_mom": app.screen = "email_mom"; break;
+    case "open_email_work": app.screen = "email_work"; break;
+    case "open_email_spam": app.screen = "email_spam"; break;
+    case "compose": app.screen = "compose"; break;
+    case "back_inbox": app.screen = "inbox"; break;
+    case "reply_mom_yes": makeDraft("Mom", "Yes, I'll be there!"); break;
+    case "reply_mom_no": makeDraft("Mom", "Sorry, I can't make it."); break;
+    case "reply_work_yes": makeDraft("Work", "Yes, I'll send it by Friday."); break;
+    case "reply_work_later": makeDraft("Work", "Can we talk tomorrow?"); break;
+    case "compose_mom": makeDraft("Mom", "Thinking of you!"); break;
+    case "compose_work": makeDraft("Work", "Running late today."); break;
+    case "send_draft":
+      app.sent.push({ ...app.draft });
+      toast("Sent to " + app.draft.to);
+      app.draft = null; app.screen = "inbox"; break;
+    case "discard_draft": app.draft = null; app.screen = "inbox"; toast("Draft discarded"); break;
+    case "delete_spam": app.spamDeleted = true; app.screen = "inbox"; toast("Spam deleted"); break;
+    case "delete_email_mom": app.screen = "inbox"; toast("Email moved to trash"); break;
+    case "archive_work": app.workArchived = true; app.screen = "inbox"; toast("Email archived"); break;
+    case "scroll_down": toast("No more emails"); break;
+    default: toast(labelOf(id) + " (not part of this demo)");
+  }
+}
+
+// ---------------- Test tasks ----------------
+
+const TASKS = [
+  { name: "Reply 'Yes' to Mom's dinner email", done: () => app.sent.some(m => m.to === "Mom" && m.text.startsWith("Yes")) },
+  { name: "Tell Mom you can't make it", done: () => app.sent.some(m => m.to === "Mom" && m.text.startsWith("Sorry")) },
+  { name: "Delete the spam email", done: () => app.spamDeleted },
+  { name: "Tell Work the report is coming Friday", done: () => app.sent.some(m => m.to === "Work" && m.text.includes("Friday")) },
+  { name: "Ask Work to talk tomorrow", done: () => app.sent.some(m => m.to === "Work" && m.text.includes("tomorrow")) },
+  { name: "Archive the Work email", done: () => app.workArchived },
+  { name: "Send Mom 'Thinking of you!'", done: () => app.sent.some(m => m.to === "Mom" && m.text.startsWith("Thinking")) },
+  { name: "Tell Work you're running late", done: () => app.sent.some(m => m.to === "Work" && m.text.startsWith("Running")) },
+];
+
+// ---------------- Switch scanning ----------------
+
+let mode = "kin";           // "kin" or "trad"
+let options = [];           // what the highlight currently moves through
+let idx = 0;                // which option is highlighted
+let target = "panel";       // "panel" (KIN choices / confirm) or "app" (scanning the screen)
+let pendingRisky = null;    // risky element waiting for confirmation
+let busy = false;           // waiting for the AI
+let presses = 0;
+let startTime = null;
+let currentTask = null;
+const results = [];
+const aiStats = { calls: 0, modelMs: 0, waits: 0, waitMs: 0, rejected: 0, fallbacks: 0, errors: 0 };
+let steps = [];   // what the user chose this task, shown on screen
+
+function setOptions(list, where) { options = list; idx = 0; target = where; render(); }
+
+// ---------------- AI suggestions with prefetching ----------------
+// While the user looks at their choices, KIN quietly asks Muse Spark about the
+// screens each choice leads to, so the next answer is usually ready instantly.
+
+const cache = new Map();   // payload key -> promise of the /suggest response
+let silent = false;        // true while simulating actions for prefetch
+
+function buildPayload() {
+  const screen = getScreen();
+  return {
+    screen: screen.name,
+    description: screen.description,
+    elements: screen.elements.map(e => ({ id: e.id, label: e.label, risky: !!e.risky })),
+    recent_actions: app.recent,
+  };
+}
+
+function fetchSuggestions(payload) {
+  const key = JSON.stringify(payload);
+  if (!cache.has(key)) {
+    const t0 = performance.now();
+    const p = fetch("/suggest", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+    }).then(r => r.json()).then(data => {
+      aiStats.calls++;
+      aiStats.modelMs += performance.now() - t0;
+      aiStats.rejected += data.rejected_count || 0;
+      if (data.used_fallback) aiStats.fallbacks++;
+      return data;
+    });
+    p.catch(() => cache.delete(key));   // let a failed call be retried later
+    cache.set(key, p);
+  }
+  return cache.get(key);
+}
+
+// Predict the screen after an action without changing the real app.
+function payloadAfter(id) {
+  const saved = app;
+  app = structuredClone(saved);
+  silent = true;
+  try { perform(id); return buildPayload(); }
+  finally { app = saved; silent = false; }
+}
+
+function prefetch(choices) {
+  for (const c of choices) {
+    if (c.id.startsWith("__")) continue;
+    const el = getScreen().elements.find(e => e.id === c.id);
+    if (!el || el.risky) continue;   // risky actions show a confirm step first
+    fetchSuggestions(payloadAfter(c.id)).catch(() => {});
+  }
+}
+
+async function refreshOptions() {
+  pendingRisky = null;
+  if (mode === "trad") { setOptions(getScreen().elements, "app"); return; }
+
+  busy = true; render();
+  const screen = getScreen();
+  const t0 = performance.now();
+  let suggestions = [];
+  try {
+    const data = await fetchSuggestions(buildPayload());
+    suggestions = data.suggestions || [];
+  } catch (err) {
+    aiStats.errors++;
+    suggestions = screen.content.slice(0, 4).map(e => ({ element_id: e.id, label: e.label, risky: !!e.risky }));
+  }
+  aiStats.waits++;
+  aiStats.waitMs += performance.now() - t0;
+  busy = false;
+
+  const choices = suggestions.map(s => ({ id: s.element_id, label: s.label, risky: s.risky }));
+  choices.push({ id: "__more", label: "Something else (scan the whole screen)" });
+  setOptions(choices, "panel");
+  prefetch(choices);
+}
+
+function press(kind) {
+  if (busy) return;
+  if (currentTask && !currentTask.finished && startTime === null) startTime = performance.now();
+  presses++;
+  if (kind === "next") { idx = (idx + 1) % options.length; render(); return; }
+  choose(options[idx]);
+}
+
+function choose(opt) {
+  if (!opt) return;
+  steps.push(opt.label);
+  if (opt.id === "__more") { setOptions(getScreen().elements, "app"); return; }
+  if (opt.id === "__cancel") { pendingRisky = null; refreshOptions(); return; }
+  if (opt.id === "__confirm") { const el = pendingRisky; pendingRisky = null; afterAction(el.id); return; }
+
+  // Risk comes from the app's own element list, never from the AI.
+  const el = getScreen().elements.find(e => e.id === opt.id);
+  if (!el) { refreshOptions(); return; }
+  if (el.risky) {
+    pendingRisky = el;
+    setOptions([{ id: "__cancel", label: "Cancel" }, { id: "__confirm", label: "Yes, " + el.label.toLowerCase() }], "panel");
+    return;
+  }
+  afterAction(el.id);
+}
+
+function afterAction(id) {
+  perform(id);
+  checkTask();
+  refreshOptions();
+}
+
+// ---------------- Tasks and results ----------------
+
+function startTask() {
+  const i = Number(document.getElementById("taskSelect").value);
+  app = freshAppState();
+  presses = 0; startTime = null; steps = [];
+  currentTask = { ...TASKS[i], index: i, finished: false };
+  refreshOptions();
+}
+
+function checkTask() {
+  if (!currentTask || currentTask.finished || !currentTask.done()) return;
+  currentTask.finished = true;
+  const secs = startTime ? (performance.now() - startTime) / 1000 : 0;
+  results.push({ task: currentTask.name, mode: mode === "kin" ? "KIN Access" : "Traditional", presses, secs, ok: true });
+  toast("Task complete: " + presses + " presses");
+  renderResults();
+}
+
+function renderResults() {
+  document.getElementById("results").innerHTML = results.map(r =>
+    `<tr><td>${r.task}</td><td>${r.mode}</td><td>${r.presses}</td><td>${r.secs.toFixed(1)}</td><td>${r.ok ? "Yes" : "No"}</td></tr>`
+  ).join("");
+  const model = aiStats.calls ? (aiStats.modelMs / aiStats.calls / 1000).toFixed(2) : "0";
+  const wait = aiStats.waits ? (aiStats.waitMs / aiStats.waits / 1000).toFixed(2) : "0";
+  document.getElementById("aiStats").textContent =
+    `Avg wait for choices: ${wait}s | Avg model response: ${model}s | AI calls (incl. prefetch): ${aiStats.calls} | Rejected AI picks: ${aiStats.rejected} | Fallbacks: ${aiStats.fallbacks} | Errors: ${aiStats.errors}`;
+}
+
+function resultsMarkdown() {
+  const rows = results.map(r => `| ${r.task} | ${r.mode} | ${r.presses} | ${r.secs.toFixed(1)} |`);
+  return ["| Task | Mode | Presses | Seconds |", "|---|---|---|---|", ...rows].join("\n");
+}
+
+// ---------------- Rendering ----------------
+
+function elButton(e, highlighted) {
+  const b = document.createElement("div");
+  b.className = "el" + (e.risky ? " risky" : "") + (highlighted ? " highlight" : "");
+  b.textContent = e.label;
+  return b;
+}
+
+function render() {
+  const screen = getScreen();
+  document.getElementById("screenName").textContent = screen.name;
+
+  const hiId = target === "app" && options[idx] ? options[idx].id : null;
+  const tb = document.getElementById("toolbar"); tb.innerHTML = "";
+  screen.toolbar.forEach(e => tb.appendChild(elButton(e, e.id === hiId)));
+  const ct = document.getElementById("content"); ct.innerHTML = "";
+  if (screen.body) { const d = document.createElement("div"); d.className = "body"; d.textContent = screen.body; ct.appendChild(d); }
+  screen.content.forEach(e => ct.appendChild(elButton(e, e.id === hiId)));
+
+  const panel = document.getElementById("panel");
+  if (busy) {
+    panel.innerHTML = `<h2>KIN Access</h2><div class="thinking">Muse Spark is reading the screen...</div>`;
+  } else if (pendingRisky) {
+    panel.innerHTML = `<h2>Please confirm</h2><div class="confirm-title">This action can't be undone easily.</div>`;
+    options.forEach((o, i) => panel.appendChild(choiceEl(o, i, i === idx)));
+  } else if (target === "panel") {
+    panel.innerHTML = `<h2>KIN Access</h2><div class="muted">Most likely next actions, best guess first</div>`;
+    options.forEach((o, i) => panel.appendChild(choiceEl(o, i, i === idx)));
+  } else {
+    panel.innerHTML = mode === "trad"
+      ? `<h2>Traditional scanning</h2><div class="muted">The highlight steps through every item on the screen, one at a time.</div>`
+      : `<h2>Scanning the whole screen</h2><div class="muted">You chose "Something else". KIN suggestions return after this action.</div>`;
+  }
+
+  document.getElementById("presses").textContent = presses;
+  document.getElementById("modeKin").classList.toggle("active", mode === "kin");
+  document.getElementById("modeTrad").classList.toggle("active", mode === "trad");
+
+  const tbox = document.getElementById("taskBox");
+  if (currentTask) {
+    tbox.className = "task" + (currentTask.finished ? " done" : "");
+    tbox.innerHTML = "";
+    const head = document.createElement("div");
+    head.textContent = (currentTask.finished ? "Done: " : "Task: ") + currentTask.name;
+    tbox.appendChild(head);
+    if (steps.length) {
+      const log = document.createElement("div");
+      log.className = "muted"; log.style.marginTop = "6px";
+      log.textContent = "Steps: " + steps.join(" → ");
+      tbox.appendChild(log);
+    }
+  }
+  renderResults();
+}
+
+function choiceEl(o, i, highlighted) {
+  const b = document.createElement("div");
+  b.className = "choice" + (o.risky ? " risky" : "") + (highlighted ? " highlight" : "");
+  b.innerHTML = `<span class="n">${i + 1}</span>`;
+  b.appendChild(document.createTextNode(o.label));
+  if (o.risky) { const t = document.createElement("span"); t.className = "tag"; t.textContent = "needs confirmation"; b.appendChild(t); }
+  return b;
+}
+
+let toastTimer;
+function toast(msg) {
+  if (silent) return;
+  const t = document.getElementById("toast");
+  t.textContent = msg; t.classList.add("show");
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove("show"), 1600);
+}
+
+// Live timer display
+setInterval(() => {
+  let secs = 0;
+  if (startTime !== null) {
+    secs = (performance.now() - startTime) / 1000;
+    if (currentTask && currentTask.finished && results.length) secs = results[results.length - 1].secs;
+  }
+  document.getElementById("timer").textContent = secs.toFixed(1) + "s";
+}, 100);
+
+// ---------------- Controls ----------------
+
+document.addEventListener("keydown", e => {
+  if (e.target.tagName === "SELECT") return;
+  if (e.code === "Space") { e.preventDefault(); if (!e.repeat) press("next"); }
+  else if (e.key === "Enter") { e.preventDefault(); if (!e.repeat) press("select"); }
+});
+
+const sel = document.getElementById("taskSelect");
+TASKS.forEach((t, i) => { const o = document.createElement("option"); o.value = i; o.textContent = (i + 1) + ". " + t.name; sel.appendChild(o); });
+
+// Buttons drop focus after a click so Space/Enter never "click" them by accident.
+function onClick(id, fn) { const b = document.getElementById(id); b.addEventListener("click", () => { b.blur(); fn(); }); }
+onClick("modeKin", () => { mode = "kin"; startTask(); });
+onClick("modeTrad", () => { mode = "trad"; startTask(); });
+onClick("startTask", startTask);
+onClick("reset", () => { app = freshAppState(); presses = 0; startTime = null; currentTask = null; steps = [];
+  document.getElementById("taskBox").className = "task";
+  document.getElementById("taskBox").textContent = "No task running. Pick one above and press \"Start task\".";
+  refreshOptions(); });
+onClick("copyResults", () => { navigator.clipboard.writeText(resultsMarkdown()); toast("Results copied"); });
+
+refreshOptions();
+</script>
+</body>
+</html>
