@@ -70,6 +70,7 @@
   <button class="btn" id="startTask">Start task</button>
   <button class="btn" id="reset">Reset</button>
   <button class="btn" id="largeText">Large text</button>
+  <button class="btn" id="visionToggle" title="Send Muse Spark a real screenshot of the app">Vision mode: Off</button>
 </header>
 
 <main>
@@ -87,6 +88,8 @@
       Most accessibility switches connect as keyboard keys, so these stand in for real switches.
     </p>
     <div class="task" id="taskBox">No task running. Pick one above and press "Start task".</div>
+    <button class="btn" id="seeBtn" style="margin-top:12px">Ask Muse Spark what it sees</button>
+    <div class="task" id="seeBox" style="display:none"></div>
   </section>
 
   <section class="full">
@@ -106,11 +109,12 @@
       first AI suggestion that moves the task forward, or uses "Something else" if none does.
       Presses are counted exactly as in the live interface. No caching, so each run is a fresh AI call.</div>
     <div style="margin:10px 0">
-      <button class="btn" id="runEval">Run automatic evaluation (8 tasks x 3 runs)</button>
+      <button class="btn" id="runEval">Run automatic evaluation (8 tasks x 3 runs, current mode)</button>
       <button class="btn" id="copyEval">Copy evaluation as Markdown</button>
     </div>
     <div id="evalStatus" class="muted"></div>
     <div id="evalSummary" style="font-size:18px;font-weight:600;margin:6px 0 8px"></div>
+    <div id="evalCompare" class="muted" style="margin-bottom:8px"></div>
     <table>
       <thead><tr><th>Task</th><th>Traditional minimum</th><th>KIN runs (presses)</th><th>KIN average</th><th>Presses saved</th><th>Top pick right</th></tr></thead>
       <tbody id="evalRows"></tbody>
@@ -120,6 +124,7 @@
 
 <div class="toast" id="toast"></div>
 
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
 <script>
 // ---------------- Mock email app ----------------
 
@@ -163,6 +168,7 @@ function getScreen() {
     if (!s.workArchived) list.push("Work: 'Can you send the report by Friday?'" + (wasSentTo("Work") ? " (already replied)" : " (unread)"));
     if (!s.spamDeleted) list.push("Spam: 'You won a prize!'");
     description = "Email inbox. Emails: " + list.join("; ") + ".";
+    body = list.join("\n");   // inbox previews, like a real mail app
   } else if (s.screen === "email_mom") {
     name = "Reading: email from Mom";
     body = EMAILS.mom;
@@ -274,7 +280,7 @@ let presses = 0;
 let startTime = null;
 let currentTask = null;
 const results = [];
-const aiStats = { calls: 0, modelMs: 0, waits: 0, waitMs: 0, rejected: 0, fallbacks: 0, errors: 0 };
+const aiStats = { calls: 0, modelMs: 0, waits: 0, waitMs: 0, rejected: 0, fallbacks: 0, errors: 0, visionCalls: 0, captureFails: 0, lastModel: "" };
 let steps = [];   // what the user chose this task, shown on screen
 
 function setOptions(list, where) { options = list; idx = 0; target = where; render(); }
@@ -283,8 +289,9 @@ function setOptions(list, where) { options = list; idx = 0; target = where; rend
 // While the user looks at their choices, KIN quietly asks Muse Spark about the
 // screens each choice leads to, so the next answer is usually ready instantly.
 
-const cache = new Map();   // payload key -> promise of the /suggest response
+const cache = new Map();   // mode + payload key -> promise of the /suggest response
 let silent = false;        // true while simulating actions for prefetch
+let vision = false;        // Vision mode: send Muse Spark a real screenshot of the app
 
 function buildPayload() {
   const screen = getScreen();
@@ -296,36 +303,84 @@ function buildPayload() {
   };
 }
 
-function fetchSuggestions(payload) {
-  const key = JSON.stringify(payload);
+// ---------- Vision: render any app state off-screen and photograph it ----------
+
+function renderMailInto(box) {
+  const screen = getScreen();
+  box.innerHTML = "";
+  const h = document.createElement("h2"); h.textContent = "Mail"; box.appendChild(h);
+  const sub = document.createElement("div"); sub.className = "muted"; sub.textContent = screen.name; box.appendChild(sub);
+  const tb = document.createElement("div"); tb.className = "toolbar";
+  screen.toolbar.forEach(e => tb.appendChild(elButton(e, false))); box.appendChild(tb);
+  const ct = document.createElement("div"); ct.className = "content";
+  if (screen.body) { const d = document.createElement("div"); d.className = "body"; d.textContent = screen.body; ct.appendChild(d); }
+  screen.content.forEach(e => ct.appendChild(elButton(e, false)));
+  box.appendChild(ct);
+}
+
+// Returns a JPEG data URL of what the user would see in this app state, or null.
+async function captureState(state) {
+  if (!window.html2canvas) return null;
+  const box = document.createElement("section");
+  box.style.cssText = "position:fixed;left:-10000px;top:0;width:720px;padding:16px;border-radius:0;background:#181b22;color:#e8eaf0";
+  const saved = app; app = state;
+  try { renderMailInto(box); } finally { app = saved; }
+  document.body.appendChild(box);
+  try {
+    const canvas = await html2canvas(box, { backgroundColor: "#181b22", scale: 1, logging: false });
+    return canvas.toDataURL("image/jpeg", 0.8);
+  } catch (e) { return null; }
+  finally { box.remove(); }
+}
+
+function payloadFor(state) {
+  const saved = app; app = state;
+  try { return buildPayload(); } finally { app = saved; }
+}
+
+// One call to the backend. In Vision mode the screenshot goes along with the action list.
+async function callSuggest(state, useVision) {
+  const payload = payloadFor(state);
+  if (useVision) {
+    const shot = await captureState(state);
+    if (shot) payload.screenshot = shot; else aiStats.captureFails++;
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), useVision ? 30000 : 15000);
+  try {
+    const r = await fetch("/suggest", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload), signal: controller.signal });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const data = await r.json();
+    if (data.vision_used) aiStats.visionCalls++;
+    if (data.model_used) aiStats.lastModel = data.model_used;
+    return data;
+  } finally { clearTimeout(timer); }
+}
+
+function fetchSuggestions(state) {
+  const key = (vision ? "vision|" : "text|") + JSON.stringify(payloadFor(state));
   if (!cache.has(key)) {
     const t0 = performance.now();
-    // Never let a slow or stuck AI call freeze the user: give up after 15 seconds.
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 15000);
-    const p = fetch("/suggest", {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
-      signal: controller.signal,
-    }).then(r => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); }).then(data => {
-      clearTimeout(timer);
+    const p = callSuggest(state, vision).then(data => {
       aiStats.calls++;
       aiStats.modelMs += performance.now() - t0;
       aiStats.rejected += data.rejected_count || 0;
       if (data.used_fallback) aiStats.fallbacks++;
       return data;
     });
-    p.catch(() => { clearTimeout(timer); cache.delete(key); });   // let a failed call be retried later
+    p.catch(() => cache.delete(key));   // let a failed call be retried later
     cache.set(key, p);
   }
   return cache.get(key);
 }
 
-// Predict the screen after an action without changing the real app.
-function payloadAfter(id) {
+// Predict the app state after an action without changing the real app.
+function stateAfter(id) {
   const saved = app;
   app = structuredClone(saved);
   silent = true;
-  try { perform(id); return buildPayload(); }
+  try { perform(id); return app; }
   finally { app = saved; silent = false; }
 }
 
@@ -334,7 +389,7 @@ function prefetch(choices) {
     if (c.id.startsWith("__")) continue;
     const el = getScreen().elements.find(e => e.id === c.id);
     if (!el || el.risky) continue;   // risky actions show a confirm step first
-    fetchSuggestions(payloadAfter(c.id)).catch(() => {});
+    fetchSuggestions(stateAfter(c.id)).catch(() => {});
   }
 }
 
@@ -347,7 +402,7 @@ async function refreshOptions() {
   const t0 = performance.now();
   let suggestions = [];
   try {
-    const data = await fetchSuggestions(buildPayload());
+    const data = await fetchSuggestions(structuredClone(app));
     suggestions = data.suggestions || [];
   } catch (err) {
     aiStats.errors++;
@@ -464,7 +519,7 @@ function renderResults() {
   const model = aiStats.calls ? (aiStats.modelMs / aiStats.calls / 1000).toFixed(2) : "0";
   const wait = aiStats.waits ? (aiStats.waitMs / aiStats.waits / 1000).toFixed(2) : "0";
   document.getElementById("aiStats").textContent =
-    `Avg wait for choices: ${wait}s | Avg model response: ${model}s | AI calls (incl. prefetch): ${aiStats.calls} | Rejected AI picks: ${aiStats.rejected} | Fallbacks: ${aiStats.fallbacks} | Errors: ${aiStats.errors}`;
+    `Avg wait for choices: ${wait}s | Avg model response: ${model}s | AI calls (incl. prefetch): ${aiStats.calls} | Rejected AI picks: ${aiStats.rejected} | Fallbacks: ${aiStats.fallbacks} | Errors: ${aiStats.errors} | Vision calls: ${aiStats.visionCalls}${aiStats.lastModel ? " | Model: " + aiStats.lastModel : ""}`;
 }
 
 function resultsMarkdown() {
@@ -516,15 +571,12 @@ function makesProgress(id, task, taskIndex) {
   finally { app = saved; }
 }
 
-async function askModel(payload) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 20000);
-  try {
-    const r = await fetch("/suggest", { method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload), signal: controller.signal });
-    if (!r.ok) throw new Error("HTTP " + r.status);
-    return await r.json();
-  } finally { clearTimeout(timer); }
+let evalVisionCalls = 0, evalCalls = 0;
+async function askModel(state) {
+  evalCalls++;
+  const data = await callSuggest(state, vision);
+  if (data.vision_used) evalVisionCalls++;
+  return data;
 }
 
 async function evalOneRun(task, taskIndex) {
@@ -534,7 +586,7 @@ async function evalOneRun(task, taskIndex) {
     steps++;
     const screen = getScreen();
     let ids = [];
-    try { ids = ((await askModel(buildPayload())).suggestions || []).map(x => x.element_id); }
+    try { ids = ((await askModel(structuredClone(app))).suggestions || []).map(x => x.element_id); }
     catch (e) { ids = []; }
     ids = ids.filter(id => screen.elements.some(el => el.id === id));
     const risky = id => screen.elements.find(el => el.id === id).risky ? 2 : 0;
@@ -559,7 +611,9 @@ async function evalOneRun(task, taskIndex) {
   return task.done() ? { presses: count, topRight, decisions } : null;
 }
 
-const evalResults = [];   // { task, baseline, runs: [presses], topRight, decisions }
+const evalStore = { text: [], vision: [] };   // rows per mode: { task, baseline, runs, topRight, decisions }
+let evalMode = "text";
+let evalResults = evalStore.text;
 let evalRunning = false;
 
 async function runEvaluation(runsPerTask = 3) {
@@ -567,30 +621,33 @@ async function runEvaluation(runsPerTask = 3) {
   evalRunning = true;
   const savedApp = app;
   silent = true;
-  evalResults.length = 0;
+  evalMode = vision ? "vision" : "text";
+  evalStore[evalMode] = []; evalResults = evalStore[evalMode];
+  evalVisionCalls = 0; evalCalls = 0;
   const status = document.getElementById("evalStatus");
   try {
     for (let t = 0; t < TASKS.length; t++) {
       const row = { task: TASKS[t].name, baseline: BASELINE[t], runs: [], topRight: 0, decisions: 0 };
       evalResults.push(row);
       for (let r = 0; r < runsPerTask; r++) {
-        status.textContent = `Running task ${t + 1} of ${TASKS.length}, run ${r + 1} of ${runsPerTask}...`;
+        status.textContent = `${evalMode === "vision" ? "Vision" : "Text"} mode: running task ${t + 1} of ${TASKS.length}, run ${r + 1} of ${runsPerTask}...`;
         const res = await evalOneRun(TASKS[t], t);
         row.runs.push(res ? res.presses : null);
         if (res) { row.topRight += res.topRight; row.decisions += res.decisions; }
         renderEval();
       }
     }
-    status.textContent = "Done. Every run used a fresh call to Muse Spark.";
+    status.textContent = `Done (${evalMode} mode). Every run used fresh calls to Muse Spark.` +
+      (evalMode === "vision" ? ` Screenshot was used on ${evalVisionCalls} of ${evalCalls} calls${aiStats.lastModel ? " (" + aiStats.lastModel + ")" : ""}.` : "");
   } finally {
     app = savedApp; silent = false; evalRunning = false;
     render();
   }
 }
 
-function evalTotals() {
+function evalTotals(rows = evalResults) {
   let kin = 0, base = 0, wins = 0, n = 0, top = 0, dec = 0;
-  for (const row of evalResults) {
+  for (const row of rows) {
     for (const p of row.runs) { if (p == null) continue; kin += p; base += row.baseline; n++; if (p < row.baseline) wins++; }
     top += row.topRight; dec += row.decisions;
   }
@@ -608,10 +665,15 @@ function renderEval() {
   }).join("");
   const t = evalTotals();
   document.getElementById("evalSummary").textContent = t.n
-    ? `${t.n} runs: ${t.kin} presses with KIN Access vs ${t.base} with traditional scanning (minimum). ` +
+    ? `${evalMode === "vision" ? "Vision" : "Text"} mode, ${t.n} runs: ${t.kin} presses with KIN Access vs ${t.base} with traditional scanning (minimum). ` +
       `${Math.round((1 - t.kin / t.base) * 100)}% fewer presses. Beat traditional in ${t.wins} of ${t.n} runs. ` +
       `Muse Spark's first suggestion was right ${Math.round(t.top / t.dec * 100)}% of the time.`
     : "";
+  const line = (name, rows) => { const x = evalTotals(rows); return x.n
+    ? `${name}: ${x.kin} vs ${x.base} presses (${Math.round((1 - x.kin / x.base) * 100)}% fewer), top pick right ${Math.round(x.top / x.dec * 100)}%`
+    : `${name}: not run yet`; };
+  document.getElementById("evalCompare").textContent =
+    (evalStore.text.length || evalStore.vision.length) ? "Comparison | " + line("Text mode", evalStore.text) + " | " + line("Vision mode", evalStore.vision) : "";
 }
 
 function evalMarkdown() {
@@ -623,7 +685,8 @@ function evalMarkdown() {
     return `| ${row.task} | ${row.baseline} | ${row.runs.map(p => p ?? "failed").join(", ")} | ${avg != null ? avg.toFixed(1) : "-"} | ${saved} | ${top} |`;
   });
   return ["| Task | Traditional minimum | KIN runs (presses) | KIN average | Presses saved | Top pick right |",
-          "|---|---|---|---|---|---|", ...rows, "", document.getElementById("evalSummary").textContent].join("\n");
+          "|---|---|---|---|---|---|", ...rows, "", document.getElementById("evalSummary").textContent,
+          "", document.getElementById("evalCompare").textContent].join("\n");
 }
 
 // ---------------- Rendering ----------------
@@ -648,7 +711,7 @@ function render() {
 
   const panel = document.getElementById("panel");
   if (busy) {
-    panel.innerHTML = `<h2>KIN Access</h2><div class="thinking">Muse Spark is reading the screen...</div>`;
+    panel.innerHTML = `<h2>KIN Access</h2><div class="thinking">${vision ? "Muse Spark is looking at a screenshot of the screen..." : "Muse Spark is reading the screen's contents..."}</div>`;
   } else if (pendingRisky) {
     panel.innerHTML = `<h2>Please confirm</h2><div class="confirm-title">This action can't be undone easily.</div>`;
     options.forEach((o, i) => panel.appendChild(choiceEl(o, i, i === idx)));
@@ -731,6 +794,31 @@ onClick("reset", () => { app = freshAppState(); presses = 0; startTime = null; c
   refreshOptions(); });
 onClick("largeText", () => { document.body.classList.toggle("large");
   document.getElementById("largeText").classList.toggle("active", document.body.classList.contains("large")); });
+onClick("visionToggle", () => {
+  vision = !vision;
+  const b = document.getElementById("visionToggle");
+  b.textContent = "Vision mode: " + (vision ? "On" : "Off");
+  b.classList.toggle("active", vision);
+  if (vision && !window.html2canvas) toast("Screenshot library didn't load, so text mode will be used");
+  if (mode === "kin" && !evalRunning) refreshOptions();
+});
+onClick("seeBtn", async () => {
+  const box = document.getElementById("seeBox");
+  box.style.display = "block";
+  box.textContent = "Taking a screenshot and asking Muse Spark...";
+  const shot = await captureState(structuredClone(app));
+  if (!shot) { box.textContent = "Couldn't take a screenshot (the html2canvas library may not have loaded)."; return; }
+  try {
+    const r = await fetch("/describe", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ screenshot: shot }) });
+    const data = await r.json();
+    box.innerHTML = "";
+    const head = document.createElement("div"); head.className = "muted";
+    head.textContent = "Muse Spark sees (screenshot only, no text description" + (data.model ? ", " + data.model : "") + "):";
+    const body = document.createElement("div"); body.style.marginTop = "6px"; body.textContent = data.text;
+    box.appendChild(head); box.appendChild(body);
+  } catch (e) { box.textContent = "Vision request failed: " + e.message; }
+});
 onClick("runEval", () => runEvaluation(3));
 onClick("copyEval", () => { navigator.clipboard.writeText(evalMarkdown()); toast("Evaluation copied"); });
 onClick("copyResults", () => { navigator.clipboard.writeText(resultsMarkdown()); toast("Results copied"); });
