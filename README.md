@@ -2,6 +2,8 @@
 
 **AI-powered switch access for people with severe motor disabilities like ALS.**
 
+   *KIN stands for Kinetic Intelligence Nexus: AI that connects people with limited movement to their computer.*
+
 Traditional switch scanning steps through every item on screen one press at a time. KIN Access uses Meta's Muse Spark to predict the 4 most likely next actions, so tasks take a few presses instead of dozens.
 
 Built for the Meta Global AI Developer Hackathon 2026 (Indie Developer track, Push the Frontier).
