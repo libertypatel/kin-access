@@ -7,7 +7,7 @@
 <style>
   :root {
     --bg: #0f1115; --panel: #181b22; --card: #22262f; --line: #2c313c;
-    --text: #e8eaf0; --muted: #9aa3b2; --accent: #4f8cff;
+    --text: #e8eaf0; --muted: #9aa3b2; --accent: #1f5fd6;
     --focus: #ffd34d; --risky: #ff7b7b; --ok: #3ecf8e;
   }
   * { box-sizing: border-box; }
@@ -52,6 +52,11 @@
            font-weight: 600; opacity: 0; transition: opacity .3s; pointer-events: none; }
   .toast.show { opacity: 1; }
   .full { grid-column: 1 / -1; }
+  /* Respect users who turn off animations in their system settings */
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+  /* Large text mode for users with low vision */
+  body.large .choice { font-size: 26px; padding: 22px; }
+  body.large .el, body.large .body { font-size: 19px; }
 </style>
 </head>
 <body>
@@ -64,6 +69,7 @@
   <select class="btn" id="taskSelect"></select>
   <button class="btn" id="startTask">Start task</button>
   <button class="btn" id="reset">Reset</button>
+  <button class="btn" id="largeText">Large text</button>
 </header>
 
 <main>
@@ -723,6 +729,8 @@ onClick("reset", () => { app = freshAppState(); presses = 0; startTime = null; c
   document.getElementById("taskBox").className = "task";
   document.getElementById("taskBox").textContent = "No task running. Pick one above and press \"Start task\".";
   refreshOptions(); });
+onClick("largeText", () => { document.body.classList.toggle("large");
+  document.getElementById("largeText").classList.toggle("active", document.body.classList.contains("large")); });
 onClick("runEval", () => runEvaluation(3));
 onClick("copyEval", () => { navigator.clipboard.writeText(evalMarkdown()); toast("Evaluation copied"); });
 onClick("copyResults", () => { navigator.clipboard.writeText(resultsMarkdown()); toast("Results copied"); });
