@@ -137,7 +137,10 @@ All code in this repository was written during the hackathon building period (Oc
 
 ## Demo video
 
-(https://youtu.be/DfLt1QxTV-U)
+<a href="https://youtu.be/DfLt1QxTV-U"><img width="1280" height="720" alt="kin-access-thumbnail" src="https://github.com/user-attachments/assets/89f4e36e-889f-4338-9401-4cc12857ba73" /></a>
+
+
+**Watch the 3-minute demo:** https://youtu.be/DfLt1QxTV-U
 
 ## What's next
 
