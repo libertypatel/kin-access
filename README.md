@@ -137,7 +137,7 @@ All code in this repository was written during the hackathon building period (Oc
 
 ## Demo video
 
-[Link to 3-minute demo]
+(https://youtu.be/DfLt1QxTV-U)
 
 ## What's next
 
